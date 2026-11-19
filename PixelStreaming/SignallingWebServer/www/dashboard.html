@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Violation Log</title>
+<style>
+  :root { --bg:#0f141b; --panel:#171e28; --line:#263142; --text:#e7edf6; --muted:#8e9bb0; --ok:#3ccf7a; --bad:#ff5a5a; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 system-ui, sans-serif; }
+  main { max-width:1100px; margin:0 auto; padding:24px 16px 48px; }
+  .bar { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-bottom:22px; }
+  select { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:7px; padding:8px 10px; font:inherit; max-width:100%; flex:1 1 260px; }
+  button, .btn { font:600 14px system-ui, sans-serif; border:0; border-radius:7px; padding:9px 16px; cursor:pointer; text-decoration:none; display:inline-block; }
+  .primary { background:var(--ok); color:#06210f; } .secondary { background:#243041; color:var(--text); }
+  h1 { font-size:18px; margin:0 0 12px; }
+  .filters { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
+  .filters button { background:#1d2633; color:var(--muted); padding:6px 12px; font-weight:500; }
+  .filters button.on { background:#2b3a50; color:var(--text); }
+  .events { display:grid; gap:12px; }
+  .ev { display:grid; grid-template-columns:minmax(0, 240px) auto minmax(0, 1fr); gap:14px; align-items:start;
+        background:var(--panel); border:1px solid var(--line); border-left:4px solid var(--bad); border-radius:10px; padding:12px; }
+  .ev img { display:block; border-radius:6px; background:#0b0f14; cursor:zoom-in; }
+  .ev .snap { width:100%; height:auto; }
+  .ev .crop { height:120px; width:auto; max-width:120px; object-fit:contain; }
+  .ev h3 { margin:0 0 4px; font-size:15px; }
+  .ev .meta { color:var(--muted); font-size:13px; font-variant-numeric:tabular-nums; }
+  .tag { display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px; background:#243041; }
+  .tag.open { background:#4a1f22; color:#ffb3b3; }
+  .empty { background:var(--panel); border:1px dashed var(--line); border-radius:10px; padding:28px; text-align:center; color:var(--muted); }
+  #zoom { position:fixed; inset:0; background:rgba(5,8,12,.88); display:none; align-items:center; justify-content:center; padding:16px; cursor:zoom-out; }
+  #zoom img { max-width:100%; max-height:100%; border-radius:6px; }
+  @media (max-width:640px) { .ev { grid-template-columns:1fr; } .ev .crop { display:none; } }
+</style>
+</head>
+<body>
+<main>
+  <div class="bar">
+    <select id="pick" aria-label="Session"></select>
+    <a class="btn secondary" href="home.html">Home</a>
+    <button class="primary" id="newSession">Start new session</button>
+  </div>
+
+  <h1>Violation log</h1>
+  <div class="filters" id="filters">
+    <button data-k="all" class="on">All</button>
+    <button data-k="no_helmet">No helmet</button>
+    <button data-k="no_vest">No vest</button>
+  </div>
+  <div class="events" id="events"></div>
+</main>
+<div id="zoom"><img alt=""></div>
+<script>
+const API = 'http://127.0.0.1:8766';
+const $ = id => document.getElementById(id);
+const clock = t => new Date(t * 1000).toLocaleTimeString();
+const KIND = { no_helmet: 'No helmet', no_vest: 'No vest' };
+let data = null, filter = 'all';
+
+function render() {
+  const s = data.summary;
+  const events = data.events.filter(e => e.ended_by !== 'resolved' && (filter === 'all' || e.kind === filter));
+  const img = f => `${API}/sessions/${s.id}/snapshots/${f}`;
+  $('events').innerHTML = events.length ? events.map(e => `<article class="ev">
+      <img class="snap" src="${img(e.snapshot)}" alt="Frame at violation, worker boxed" loading="lazy" data-zoom="${img(e.snapshot)}">
+      ${e.crop ? `<img class="crop" src="${img(e.crop)}" alt="Close-up of the worker" loading="lazy" data-zoom="${img(e.crop)}">` : '<span></span>'}
+      <div>
+        <h3>${KIND[e.kind] || e.kind}</h3>
+        <div class="meta">${clock(e.start)}</div>
+      </div></article>`).join('') : `<div class="empty">${filter === 'all' ? 'No violations recorded in this session.' : 'No violations of this type.'}</div>`;
+}
+
+async function load(id) {
+  const list = await fetch(API + '/sessions').then(r => r.json());
+  if (!list.length) { $('events').innerHTML = '<div class="empty">No sessions yet.</div>'; return; }
+  id = id || list[0].id;
+  $('pick').innerHTML = list.map(x => `<option value="${x.id}" ${x.id === id ? 'selected' : ''}>
+    ${new Date(x.started * 1000).toLocaleString()} · ${x.violations} violation(s)${x.stopped ? '' : ' · running'}</option>`).join('');
+  data = await fetch(`${API}/sessions/${id}`).then(r => r.json());
+  history.replaceState(null, '', '?session=' + id);
+  render();
+  clearTimeout(load.t);
+  if (!data.summary.stopped) load.t = setTimeout(() => load(id), 3000);
+}
+
+$('pick').onchange = e => load(e.target.value);
+$('filters').onclick = e => {
+  if (!e.target.dataset.k) return;
+  filter = e.target.dataset.k;
+  for (const b of $('filters').children) b.classList.toggle('on', b === e.target);
+  render();
+};
+$('events').onclick = e => {
+  const src = e.target.dataset && e.target.dataset.zoom;
+  if (src) { $('zoom').querySelector('img').src = src; $('zoom').style.display = 'flex'; }
+};
+$('zoom').onclick = () => { $('zoom').style.display = 'none'; };
+$('newSession').onclick = async () => {
+  await fetch(API + '/session/start', { method: 'POST' });
+  location.href = 'ppe.html';
+};
+load(new URLSearchParams(location.search).get('session'))
+  .catch(e => { $('events').innerHTML = `<div class="empty">Detector offline: ${e.message}</div>`; });
+</script>
+</body>
+</html>

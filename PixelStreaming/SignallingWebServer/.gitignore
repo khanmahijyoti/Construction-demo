@@ -1,0 +1,11 @@
+dist/
+build/
+node_modules/
+www/*
+!www/home.html
+!www/ppe.html
+!www/dashboard.html
+logs/
+certificates/
+ssl/
+certs/

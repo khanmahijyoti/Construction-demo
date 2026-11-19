@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PPE Monitor</title>
+<style>
+  :root { --bg:#0f141b; --panel:#171e28; --line:#263142; --text:#e7edf6; --muted:#8e9bb0; --ok:#3ccf7a; --bad:#ff5a5a; --warn:#f9c74f; --accent:#4ea8ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 system-ui, sans-serif; }
+  main { max-width:960px; margin:0 auto; padding:32px 16px 48px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 24px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:20px; margin-bottom:20px; }
+  .row { display:flex; flex-wrap:wrap; gap:12px 24px; align-items:center; }
+  .status b { font-weight:600; }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; background:var(--muted); }
+  .dot.ok { background:var(--ok); } .dot.bad { background:var(--bad); }
+  button, .btn { font:600 15px system-ui, sans-serif; border:0; border-radius:8px; padding:12px 22px; cursor:pointer; text-decoration:none; display:inline-block; }
+  .primary { background:var(--ok); color:#06210f; }
+  .primary:disabled { background:#2a3546; color:var(--muted); cursor:not-allowed; }
+  .secondary { background:#243041; color:var(--text); }
+  .danger { background:var(--bad); color:#2a0606; }
+  table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; }
+  th, td { text-align:left; padding:9px 8px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:500; font-size:13px; }
+  td a { color:var(--accent); text-decoration:none; }
+  .bad { color:var(--bad); } .muted { color:var(--muted); }
+  .table-wrap { overflow-x:auto; }
+  #msg { color:var(--bad); margin-top:10px; min-height:1em; }
+</style>
+</head>
+<body>
+<main>
+  <h1>PPE Monitor</h1>
+  <p class="sub">BP_Camera · helmet and safety-vest compliance</p>
+
+  <section class="card">
+    <div class="row status">
+      <span><span class="dot" id="detDot"></span>Detector: <b id="det">checking…</b></span>
+      <span class="muted" id="detInfo"></span>
+    </div>
+    <div class="row" style="margin-top:18px" id="actions">
+      <button class="primary" id="start" disabled>Start tracking</button>
+    </div>
+    <div id="msg"></div>
+  </section>
+
+  <section class="card">
+    <h2 style="font-size:16px;margin:0 0 12px">Past sessions</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Started</th><th>Duration</th><th>Workers</th><th>Violations</th><th>No helmet</th><th>No vest</th><th></th></tr></thead>
+        <tbody id="sessions"><tr><td colspan="7" class="muted">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+<script>
+const API = 'http://127.0.0.1:8766';
+const $ = id => document.getElementById(id);
+const fmtDur = s => { s = Math.round(s || 0); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
+  return (h ? h + 'h ' : '') + (h || m ? m + 'm ' : '') + x + 's'; };
+const fmtTime = t => new Date(t * 1000).toLocaleString();
+
+async function startTracking() {
+  $('start').disabled = true; $('msg').textContent = '';
+  try {
+    const r = await fetch(API + '/session/start', { method: 'POST' });
+    if (!r.ok) throw new Error((await r.json()).error || r.status);
+    location.href = 'ppe.html';
+  } catch (e) { $('msg').textContent = 'Could not start: ' + e.message; $('start').disabled = false; }
+}
+
+async function stopTracking() {
+  const r = await fetch(API + '/session/stop', { method: 'POST' });
+  const d = await r.json();
+  location.href = 'dashboard.html' + (d.summary ? '?session=' + d.summary.id : '');
+}
+
+async function refresh() {
+  try {
+    const [h, s] = await Promise.all([fetch(API + '/health').then(r => r.json()), fetch(API + '/session').then(r => r.json())]);
+    $('detDot').className = 'dot ok'; $('det').textContent = 'online';
+    $('detInfo').textContent = `${h.mode} (${h.models.join(' + ')}) · ${h.device === 'cpu' ? 'CPU' : 'GPU'} · ${h.imgsz}px`;
+    if (s.active) {
+      $('actions').innerHTML = `<a class="btn primary" href="ppe.html">Open live view</a>
+        <button class="danger" id="stop">Stop tracking</button>
+        <span class="muted">Session running since ${new Date(s.started * 1000).toLocaleTimeString()} · ${s.violations} violation(s)</span>`;
+      $('stop').onclick = stopTracking;
+    } else {
+      $('actions').innerHTML = '<button class="primary" id="start">Start tracking</button>';
+      $('start').onclick = startTracking;
+    }
+  } catch {
+    $('detDot').className = 'dot bad'; $('det').textContent = 'offline';
+    $('detInfo').textContent = 'start it with Scripts\\start_live_stream.ps1';
+    $('actions').innerHTML = '<button class="primary" id="start" disabled>Start tracking</button>';
+  }
+  try {
+    const list = await fetch(API + '/sessions').then(r => r.json());
+    $('sessions').innerHTML = list.length ? list.map(x => `<tr>
+        <td>${fmtTime(x.started)}${x.stopped ? '' : ' <span class="bad">· running</span>'}</td>
+        <td>${fmtDur(x.duration_s)}</td><td>${x.workers_seen}</td>
+        <td class="${x.violations ? 'bad' : ''}">${x.violations}</td>
+        <td>${x.by_kind.no_helmet || 0}</td><td>${x.by_kind.no_vest || 0}</td>
+        <td><a href="dashboard.html?session=${x.id}">Dashboard →</a></td></tr>`).join('')
+      : '<tr><td colspan="7" class="muted">No sessions yet.</td></tr>';
+  } catch { $('sessions').innerHTML = '<tr><td colspan="7" class="muted">Detector offline.</td></tr>'; }
+}
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

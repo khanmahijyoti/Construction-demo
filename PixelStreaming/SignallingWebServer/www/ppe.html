@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PPE Live Stream</title>
+<style>
+  :root { --bg:#0f141b; --panel:#171e28; --text:#e7edf6; --muted:#8e9bb0; --ok:#3ccf7a; --bad:#ff5a5a; --person:#4ea8ff; --warn:#f9c74f; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text); font:14px/1.4 system-ui, sans-serif; }
+  body { display:grid; grid-template-rows:auto 1fr; }
+  header { display:flex; flex-wrap:wrap; gap:8px 18px; align-items:center; padding:10px 16px; background:var(--panel); }
+  header h1 { font-size:15px; margin:0 8px 0 0; font-weight:600; }
+  .stat { color:var(--muted); font-variant-numeric:tabular-nums; }
+  .stat b { color:var(--text); font-weight:600; }
+  #state { font-weight:600; color:var(--warn); }
+  #state.live { color:var(--ok); }
+  #stage { position:relative; overflow:hidden; }
+  #player, #overlay { position:absolute; inset:0; width:100%; height:100%; border:0; }
+  #overlay { pointer-events:none; }
+  .stopbtn, .startbtn { font:600 14px system-ui, sans-serif; border:0; border-radius:7px; padding:7px 14px; cursor:pointer; }
+  .stopbtn { background:var(--bad); color:#2a0606; }
+  .stopbtn:disabled { background:#2a3546; color:var(--muted); cursor:default; }
+  .startbtn { background:var(--ok); color:#06210f; padding:12px 22px; font-size:15px; }
+  #idle { position:absolute; inset:0; display:none; flex-direction:column; align-items:center; justify-content:center;
+          gap:6px; background:var(--bg); color:var(--muted); text-align:center; }
+  #idle a { color:#4ea8ff; }
+</style>
+</head>
+<body>
+<header>
+  <h1><a href="home.html" style="color:inherit;text-decoration:none">PPE Monitor</a> · live</h1>
+  <span class="stat">Session <b id="stime">–</b></span>
+  <span class="stat">Logged violations <b id="sviol">0</b></span>
+  <button id="stop" class="stopbtn" disabled>Stop tracking</button>
+  <span id="state">Connecting to Unreal…</span>
+</header>
+<div id="stage">
+
+
+  <iframe id="player" allow="autoplay; fullscreen"></iframe>
+  <canvas id="overlay"></canvas>
+  <div id="idle">
+    <p>Tracking is not running.</p>
+    <button id="startHere" class="startbtn">Start tracking</button>
+    <p><a href="home.html">← Home</a></p>
+  </div>
+</div>
+<script>
+const API = 'http://127.0.0.1:8766';
+const DETECT_URL = API + '/detect';
+const PLAYER_SRC = 'player.html?AutoConnect=true&AutoPlayVideo=true&StartVideoMuted=true&MatchViewportRes=false&HoveringMouse=true';
+let session = null;
+const OK = '#3ccf7a', BAD = '#ff5a5a';
+const iframe = document.getElementById('player');
+const overlay = document.getElementById('overlay');
+const octx = overlay.getContext('2d');
+const grab = document.createElement('canvas');
+const gctx = grab.getContext('2d', { willReadFrequently: false });
+const $ = id => document.getElementById(id);
+
+let video = null, latest = null, inFlight = false, frameTimes = [], lastVideoTime = -1;
+// Only submit frames the video has actually presented since the last submission, so a
+// frozen stream can't be re-sent as "new" evidence (the detector also drops byte-identical
+// resubmissions). frameSerial counts presented frames; sentSerial is the last one sent.
+let frameSerial = 0, sentSerial = -1;
+function watchFrames(v) {
+  if (v._ppeWatched || !v.requestVideoFrameCallback) return;
+  v._ppeWatched = true;
+  const onFrame = (_now, meta) => { frameSerial = meta.presentedFrames; v.requestVideoFrameCallback(onFrame); };
+  v.requestVideoFrameCallback(onFrame);
+}
+
+
+
+
+const HIDE_PLAYER_UI = '#controls, #connection, #settings-panel, #stats-panel, #uiFeatures { display: none !important; }';
+iframe.addEventListener('load', () => {
+  try {
+    const doc = iframe.contentDocument;
+    if (!doc || doc.getElementById('ppe-hide-ui')) return;
+    const style = doc.createElement('style');
+    style.id = 'ppe-hide-ui';
+    style.textContent = HIDE_PLAYER_UI;
+    doc.head.appendChild(style);
+  } catch {                                              }
+});
+
+function findVideo() {
+  try { return iframe.contentDocument && iframe.contentDocument.querySelector('video'); } catch { return null; }
+}
+
+
+function videoRect() {
+  const fr = iframe.getBoundingClientRect(), sr = $('stage').getBoundingClientRect();
+  const vr = video.getBoundingClientRect();
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const s = Math.min(vr.width / vw, vr.height / vh);
+  const w = vw * s, h = vh * s;
+  return { x: fr.left - sr.left + vr.left + (vr.width - w) / 2,
+           y: fr.top - sr.top + vr.top + (vr.height - h) / 2, w, h };
+}
+
+
+function showSession(s) {
+  session = s && s.active ? s : null;
+  $('idle').style.display = session ? 'none' : 'flex';
+  $('stop').disabled = !session;
+  if (session && !iframe.getAttribute('src')) iframe.src = PLAYER_SRC;
+  if (!session && iframe.getAttribute('src')) { iframe.removeAttribute('src'); video = null; latest = null; }
+  if (session) $('sviol').textContent = session.violations;
+}
+async function startSession() {
+  $('startHere').disabled = true;
+  try { showSession(await fetch(API + '/session/start', { method: 'POST' }).then(r => r.json())); }
+  catch (e) { $('state').textContent = 'Detector unreachable: ' + e.message; }
+  $('startHere').disabled = false;
+}
+async function stopSession() {
+  $('stop').disabled = true;
+  const d = await fetch(API + '/session/stop', { method: 'POST' }).then(r => r.json());
+  location.href = 'dashboard.html' + (d.summary ? '?session=' + d.summary.id : '');
+}
+$('startHere').onclick = startSession;
+$('stop').onclick = stopSession;
+fetch(API + '/session').then(r => r.json()).then(showSession)
+  .catch(() => { showSession(null); $('state').textContent = 'Detector offline'; });
+setInterval(() => {
+  if (session) {
+    const s = Math.round(Date.now() / 1000 - session.started);
+    $('stime').textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  }
+}, 500);
+
+async function detectLoop() {
+  if (!session || inFlight || !video || !video.videoWidth || video.readyState < 2) return;
+  if (frameSerial === sentSerial) return;  // no new video frame since the last submission
+  sentSerial = frameSerial;
+  inFlight = true;
+  try {
+    grab.width = video.videoWidth; grab.height = video.videoHeight;
+    gctx.drawImage(video, 0, 0);
+    const blob = await new Promise(r => grab.toBlob(r, 'image/jpeg', 0.9));
+    const res = await fetch(DETECT_URL, { method: 'POST', headers: { 'Content-Type': 'image/jpeg' }, body: blob });
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.error || res.status);
+    d.at = performance.now();
+    latest = d;
+    if (d.session) {
+      if (!d.session.active) { showSession(null); return; }
+      session = d.session; $('sviol').textContent = d.session.violations;
+    }
+  } catch (e) {
+    latest = null;
+    $('state').textContent = 'Detector unreachable (start AI/live_detector.py): ' + e.message;
+    $('state').className = '';
+    await new Promise(r => setTimeout(r, 1000));
+  } finally { inFlight = false; }
+}
+
+function render() {
+  requestAnimationFrame(render);
+  const dpr = devicePixelRatio || 1, st = $('stage');
+  if (overlay.width !== st.clientWidth * dpr || overlay.height !== st.clientHeight * dpr) {
+    overlay.width = st.clientWidth * dpr; overlay.height = st.clientHeight * dpr;
+  }
+  octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  octx.clearRect(0, 0, st.clientWidth, st.clientHeight);
+
+  if (!video || !video.isConnected) { video = findVideo(); if (video) watchFrames(video); }
+  if (!video || !video.videoWidth) return;
+
+  const now = performance.now();
+  if (video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime; frameTimes.push(now);
+    if (!video.requestVideoFrameCallback) frameSerial++;  // fallback: time advanced = new frame
+  }
+  frameTimes = frameTimes.filter(t => now - t < 1000);
+  const live = frameTimes.length > 0;
+  if (!$('state').textContent.startsWith('Detector') || latest) {
+    $('state').textContent = live ? 'LIVE' : 'Stream stalled';
+    $('state').className = live ? 'live' : '';
+  }
+
+  detectLoop();
+  if (!latest || now - latest.at > 1500) return;
+
+  const r = videoRect();
+  octx.font = '600 13px system-ui, sans-serif'; octx.textBaseline = 'top';
+  const toPx = b => [r.x + b[0] * r.w, r.y + b[1] * r.h, (b[2] - b[0]) * r.w, (b[3] - b[1]) * r.h];
+  const draw = (b, color, text, dashed, below) => {
+    const [x, y, w, h] = toPx(b);
+    octx.setLineDash(dashed ? [4, 3] : []); octx.lineWidth = dashed ? 1 : 2;
+    octx.strokeStyle = color; octx.strokeRect(x, y, w, h);
+    octx.setLineDash([]);
+    if (!text) return;
+    const tw = octx.measureText(text).width + 8;
+    const ty = below ? y + h : (y > 18 ? y - 18 : y);
+    octx.fillStyle = color; octx.fillRect(x, ty, tw, 18);
+    octx.fillStyle = '#0b0f14'; octx.fillText(text, x + 4, ty + 2);
+  };
+
+
+
+
+  for (const wk of latest.workers || []) {
+    if (wk.too_far) continue;
+    const missing = [];
+    if (wk.helmet === 'violation') missing.push('NO HELMET');
+    if (wk.vest === 'violation') missing.push('NO VEST');
+    if (wk.helmet === 'ok' && wk.helmet_box) draw(wk.helmet_box, OK, 'HELMET');
+    if (wk.vest === 'ok' && wk.vest_box) draw(wk.vest_box, OK, 'VEST', false, true);
+    if (missing.length) draw(wk.box, BAD, missing.join(' · '));
+  }
+}
+requestAnimationFrame(render);
+</script>
+</body>
+</html>
