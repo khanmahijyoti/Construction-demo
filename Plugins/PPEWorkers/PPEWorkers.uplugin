@@ -1,0 +1,1 @@
+{"FileVersion":3,"Version":1,"VersionName":"1.0","FriendlyName":"PPE Workers","Description":"Modular construction worker appearance controls and animation preview.","Category":"Characters","CanContainContent":false,"EnabledByDefault":true,"Modules":[{"Name":"PPEWorkers","Type":"Runtime","LoadingPhase":"Default"}]}
